@@ -94,6 +94,29 @@ function wait_until_csr_available () {
     clean_string "$ssh_output"
 }
 
+# Wait until a public IP address answers via SSH
+# The only thing CSR-specific is the command sent
+# Created for Network Squad BGP Hack
+# function wait_until_azure_csr_available () {
+#     wait_interval=15
+#     csr_id=$1
+#     csr_ip=$(az network public-ip show -n "azure-csr${csr_id}-pip" -g "$rg" --query ipAddress -o tsv)
+#     echo "Waiting for CSR${csr_id} with IP address $csr_ip to answer over SSH..."
+#     start_time=$(date +%s)
+#     ssh_command="show version | include uptime"  # 'show version' contains VM name and uptime
+#     ssh_output=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa "$csr_ip" "$ssh_command" 2>/dev/null)
+#     until [[ -n "$ssh_output" ]]
+#     do
+#         sleep $wait_interval
+#         ssh_output=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa "$csr_ip" "$ssh_command" 2>/dev/null)
+#     done
+#     run_time=$(("$(date +%s)" - "$start_time"))
+#     ((minutes=run_time/60))
+#     ((seconds=run_time%60))
+#     echo "IP address $csr_ip is available (wait time $minutes minutes and $seconds seconds). Answer to SSH command \"$ssh_command\":"
+#     clean_string "$ssh_output"
+# }
+
 # Wait until all VNGs in the router list finish provisioning
 function wait_for_csrs_finished () {
     for router in "${routers[@]}"
@@ -157,7 +180,7 @@ function create_vng () {
         echo "Creating test virtual machine $test_vm_name in vnet $vnet_name in new subnet $test_vm_subnet_prefix..."
         az network vnet subnet create --vnet-name "$vnet_name" -g "$rg" -n testvm --address-prefixes "$test_vm_subnet_prefix" >/dev/null
         # Not using $psk as password because it might not fulfill the password requirements for Azure VMs
-        az vm create -n "$test_vm_name" -g "$rg" -l "$location" --image UbuntuLTS --size "$test_vm_size" \
+        az vm create -n "$test_vm_name" -g "$rg" -l "$location" --image Ubuntu2204 --size "$test_vm_size" \
             --generate-ssh-keys --authentication-type all --admin-username "$default_username" --admin-password "$psk" \
             --public-ip-address "${test_vm_name}-pip" --public-ip-address-allocation static \
             --vnet-name "$vnet_name" --subnet testvm --no-wait 2>/dev/null
@@ -329,7 +352,7 @@ function create_vm_in_csr_vnet () {
     if [[ -z "$test_vm_id" ]]
     then
         echo "Creating VM $vm_name in vnet $vnet_name..."
-        az vm create -n "$vm_name" -g "$rg" -l "$location" --image ubuntuLTS --size $vm_size \
+        az vm create -n "$vm_name" -g "$rg" -l "$location" --image Ubuntu2204 --size $vm_size \
             --generate-ssh-keys --authentication-type all --admin-username "$default_username" --admin-password "$psk" \
             --public-ip-address "${vm_name}-pip" --vnet-name "$vnet_name" --public-ip-address-allocation static \
             --subnet "$vm_subnet_name" --subnet-address-prefix "$vm_subnet_prefix" --no-wait 2>/dev/null
@@ -349,7 +372,8 @@ function create_vm_in_csr_vnet () {
 function accept_csr_terms () {
     publisher=cisco
     offer=cisco-csr-1000v
-    sku=16_12-byol
+    #sku=17_03_08a-byol
+    sku=17_03_08a-byol
     # sku=17_3_4a-byol  # Newest version available
     version=$(az vm image list -p $publisher -f $offer -s $sku --all --query '[0].version' -o tsv 2>/dev/null)
     # Accept terms
@@ -374,7 +398,7 @@ function create_csr () {
     csr_bgp_ip="10.${csr_id}.0.10"
     publisher=cisco
     offer=cisco-csr-1000v
-    sku=16_12-byol
+    sku=17_03_08a-byol
     # sku=17_3_4a-byol  # Newest version available
     version=$(az vm image list -p $publisher -f $offer -s $sku --all --query '[0].version' -o tsv 2>/dev/null)
     nva_size=Standard_B2ms
@@ -410,6 +434,77 @@ function create_csr () {
         echo "Local gateway ${csr_name} already exists"
     fi
 }
+
+# Creates a CSR NVA
+# Example: create csr NVA in Azure environment
+# This is function is created to customise for the Network sqaad BGP Hack
+
+function create_azure_csr () {
+    azure_csr_id=$1
+    azure_csr_name=vng${azure_csr_id}
+    azure_csr_vnet_prefix="10.${azure_csr_id}.0.0/16"
+    azure_csr_subnet_prefix="10.${azure_csr_id}.2.0/24"
+    azure_csr_bgp_ip="10.${azure_csr_id}.2.10"
+    publisher=cisco
+    offer=cisco-csr-1000v
+    sku=17_03_08a-byol
+    # sku=17_3_4a-byol  # Newest version available
+    version=$(az vm image list -p $publisher -f $offer -s $sku --all --query '[0].version' -o tsv 2>/dev/null)
+    nva_size=Standard_B2ms
+    # Create azure_csr
+    echo "Creating VM azure-csr${azure_csr_id}-nva in Vnet $azure_csr_vnet_prefix..."
+    vm_id=$(az vm show -n "azure-csr${azure_csr_id}-nva" -g "$rg" --query id -o tsv 2>/dev/null)
+    if [[ -z "$vm_id" ]]
+    then
+        az vm create -n "azure-csr${azure_csr_id}-nva" -g "$rg" -l "$location" --image "${publisher}:${offer}:${sku}:${version}" --size "$nva_size" \
+            --generate-ssh-keys --public-ip-address "azure-csr${azure_csr_id}-pip" --public-ip-address-allocation static \
+            --vnet-name "$azure_csr_name" --vnet-address-prefix "$azure_csr_vnet_prefix" --subnet azure-nva --subnet-address-prefix "$azure_csr_subnet_prefix" \
+            --private-ip-address "$azure_csr_bgp_ip" --no-wait 2>/dev/null
+        sleep 120 # Wait 30 seconds for the creation of the PIP
+    else
+        echo "VM azure-csr${azure_csr_id}-nva already exists"
+    fi
+    # Adding UDP ports 500 and 4500 to NSG
+    nsg_name=azure-csr${azure_csr_id}-nvaNSG
+    az network nsg rule create --nsg-name "$nsg_name" -g "$rg" -n ike --priority 1010 \
+      --source-address-prefixes Internet --destination-port-ranges 500 4500 --access Allow --protocol Udp \
+      --description "UDP ports for IKE"  >/dev/null
+
+    # Configuring the NIC for IP forwarding
+    echo "Enabling IP forwading in azure-csr${azure_csr_id}-nva..."
+    nva_nic_id=$(az vm show -n "azure-csr${azure_csr_id}-nva" -g $rg --query 'networkProfile.networkInterfaces[0].id' -o tsv)
+    az network nic update --ids $nva_nic_id --ip-forwarding -o none --only-show-errors
+}
+
+# Create Azure Route Server
+# This is function is created to customise for the Network sqaad BGP Hack
+function create_route_server () {
+    
+    route_server_id=$1
+    route_server=vng${route_server_id}
+    route_server_vnet_prefix="10.${azure_csr_id}.0.0/16"
+    route_server_subnet_prefix="10.${azure_csr_id}.3.0/24"
+   
+    
+    # Create Azure Route Server
+
+    echo "Creating Azure Route Server"
+    az network vnet subnet create --name RouteServerSubnet --resource-group $rg --vnet-name $route_server --address-prefix $route_server_subnet_prefix >/dev/null
+
+
+    subnet_id=$(az network vnet subnet show --name RouteServerSubnet --resource-group $rg --vnet-name $route_server --query id -o tsv) 
+    echo $subnet_id
+
+    az network public-ip create --name "ars-${route_server}-pip" --resource-group $rg --version IPv4 --sku Standard >/dev/null
+
+    az network routeserver create --name "ars-${route_server}" --resource-group $rg --hosted-subnet $subnet_id --public-ip-address "ars-${route_server}-pip" >/dev/null
+
+    # Enable Branch to Branch flag.
+    #az network routeserver update --name ARSHack --resource-group $rg --allow-b2b-traffic true
+
+
+}
+
 
 # Connects a CSR to one VNG
 function connect_csr () {
@@ -480,12 +575,12 @@ function config_csr_base () {
     csr_id=$1
     csr_ip=$(az network public-ip show -n "csr${csr_id}-pip" -g "$rg" -o tsv --query ipAddress 2>/dev/null)
     asn=$(get_router_asn_from_id "$csr_id")
-    myip=$(curl -s4 ifconfig.co)
+    myip=$(dig @resolver4.opendns.com myip.opendns.com +short)
     # Check we have a valid IP
     until [[ $myip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
     do
         sleep 5
-        myip=$(curl -s4 ifconfig.co)
+        myip=$(dig @resolver4.opendns.com myip.opendns.com +short)
     done
     echo "Our IP seems to be $myip"
     default_gateway="10.${csr_id}.0.1"
@@ -539,6 +634,72 @@ function config_csr_base () {
     wr mem
 EOF
 }
+
+# Deploy baseline VPN and BGP config to a Cisco  CSR in Azure
+# Created for Network Squad BGP demo
+# function config_azure_csr_base () {
+#     csr_id=$1
+#     csr_ip=$(az network public-ip show -n "azure-csr${csr_id}-pip" -g "$rg" -o tsv --query ipAddress 2>/dev/null)
+#     asn="65003"
+#     myip=$(dig @resolver4.opendns.com myip.opendns.com +short)
+#     # Check we have a valid IP
+#     until [[ $myip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+#     do
+#         sleep 5
+#         myip=$(dig @resolver4.opendns.com myip.opendns.com +short)
+#     done
+#     echo "Our IP seems to be $myip"
+#     default_gateway="10.${csr_id}.2.1"
+#     echo "Configuring CSR ${csr_ip} for VPN and BGP..."
+#     username=$(whoami)
+#     password=$psk
+#     ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa "$csr_ip" >/dev/null 2>&1 <<EOF
+#     config t
+#       username ${username} password 0 ${password}
+#       username ${username} privilege 15
+#       username ${default_username} password 0 ${password}
+#       username ${default_username} privilege 15
+#       no ip domain lookup
+#       no ip ssh timeout
+#       crypto ikev2 keyring azure-keyring
+#       crypto ikev2 proposal azure-proposal
+#         encryption aes-cbc-256 aes-cbc-128 3des
+#         integrity sha1
+#         group 2
+#       crypto ikev2 policy azure-policy
+#         proposal azure-proposal
+#       crypto ikev2 profile azure-profile
+#         match address local interface GigabitEthernet1
+#         authentication remote pre-share
+#         authentication local pre-share
+#         keyring local azure-keyring
+#       crypto ipsec transform-set azure-ipsec-proposal-set esp-aes 256 esp-sha-hmac
+#         mode tunnel
+#       crypto ipsec profile azure-vti
+#         set security-association lifetime kilobytes 102400000
+#         set transform-set azure-ipsec-proposal-set
+#         set ikev2-profile azure-profile
+#       crypto isakmp policy 1
+#         encr aes
+#         authentication pre-share
+#         group 14
+#       crypto ipsec transform-set csr-ts esp-aes esp-sha-hmac
+#         mode tunnel
+#       crypto ipsec profile csr-profile
+#         set transform-set csr-ts
+#       router bgp $asn
+#         bgp router-id interface GigabitEthernet1
+#         network 10.${csr_id}.0.0 mask 255.255.0.0
+#         bgp log-neighbor-changes
+#         maximum-paths eibgp 4
+#       ip route ${myip} 255.255.255.255 ${default_gateway}
+#       ip route 10.${csr_id}.2.0 255.255.255.0 ${default_gateway}
+#       line vty 0 15
+#         exec-timeout 0 0
+#     end
+#     wr mem
+# EOF
+# }
 
 # Configure a tunnel a BGP neighbor for a specific remote endpoint on a Cisco CSR
 # "mode" can be either IKEv2 or ISAKMP. I havent been able to bring up 
@@ -912,6 +1073,7 @@ function config_gw_logging () {
 
 # Deploy base config for all CSRs
 function config_csrs_base () {
+    echo "Starting CSR Base config"
     for router in "${routers[@]}"
     do
         type=$(get_router_type  "$router")
@@ -1077,6 +1239,8 @@ fi
 # [[ $BASH_VERSION ]] && read -rsn1 -p"Press any key to start creating Azure resources into Azure subscription \"$subscription_name\"...";echo
 # [[ $ZSH_VERSION ]] && read -krs "?Press any key to start creating Azure resources into Azure subscription \"$subscription_name\"...";echo
 
+
+
 # Accept CSR image terms
 accept_csr_terms
 
@@ -1101,8 +1265,11 @@ done
 wait_for_csrs_finished
 config_csrs_base
 
+
+
 # Fix NSGs to allow all traffic between RFC1918 addresses
 fix_all_nsgs
+
 
 # Wait for VNGs to finish provisioning and configuring logging
 wait_for_gws_finished
@@ -1114,6 +1281,19 @@ for connection in "${connections[@]}"
 do
     create_connection "$connection"
 done
+
+# Create NVA in Vnet Gatewy 2 Network
+create_azure_csr "2"
+
+# # Create Route Server in  Vnet Gatewy 2 Network
+# create_route_server "2"
+
+# # Wait for CSR to be available
+# wait_until_azure_csr_available "2"
+
+
+# # Config Azure CSR Base
+# config_azure_csr_base "2"
 
 # Verify VMs/VNGs exist
 for router in "${routers[@]}"
